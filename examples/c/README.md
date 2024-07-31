@@ -12,6 +12,8 @@ huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and
 
 The examples below download the CPU binaries. To run with DirectML or CUDA, choose the appropriate binaries from GitHub.
 
+These instructions should be executed from the `examples/c` folder.
+
 ### Windows
 
 ```
