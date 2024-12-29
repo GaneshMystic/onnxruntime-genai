@@ -31,7 +31,7 @@ struct IntermediatePipelineState : State {
   IntermediatePipelineState(const IntermediatePipelineState&) = delete;
   IntermediatePipelineState& operator=(const IntermediatePipelineState&) = delete;
 
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
   bool HasInput(std::string_view name) const;
@@ -53,14 +53,17 @@ struct DecoderOnlyPipelineState : State {
   DecoderOnlyPipelineState(const DecoderOnlyPipelineState&) = delete;
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;
 
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
   OrtValue* GetOutput(const char* name) override;
 
+  void RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
+                   DeviceSpan<int32_t> next_indices);
+
  private:
-  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
-                           int current_length);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
+                           int total_length);
 
   const DecoderOnlyPipelineModel& model_;
   std::vector<std::unique_ptr<IntermediatePipelineState>> pipeline_states_;
@@ -68,10 +71,10 @@ struct DecoderOnlyPipelineState : State {
   // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
 
-  InputIDs input_ids_{*this};
+  std::unique_ptr<InputIDs> input_ids_;
   Logits logits_{*this};
-  std::unique_ptr<KV_Cache> kv_cache_;
-  PositionInputs position_inputs_;
+  std::unique_ptr<KeyValueCache> key_value_cache_;
+  std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
 

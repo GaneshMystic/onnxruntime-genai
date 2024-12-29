@@ -19,7 +19,7 @@ static constexpr size_t c_value_count = 10;  // Dump this many values from the s
 template <typename... Types>
 const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
   const char* name = "(please add type to list)";
-  ((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
+  (void)((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
   return name;
 }
 
@@ -39,15 +39,18 @@ std::ostream& operator<<(std::ostream& stream, Ort::BFloat16_t v) {
 
 template <typename T>
 void DumpSpan(std::ostream& stream, std::span<const T> values) {
+  // If type is uint8_t or int8_t cast to int so it displays as an int vs a char
+  using DisplayType = std::conditional_t<std::is_same_v<T, uint8_t> || std::is_same_v<T, int8_t>, int, T>;
+
   if (values.size() <= c_value_count) {
     for (auto v : values)
-      stream << v << ' ';
+      stream << static_cast<DisplayType>(v) << ' ';
   } else {
     for (size_t i = 0; i < c_value_count / 2; i++)
-      stream << values[i] << ' ';
+      stream << static_cast<DisplayType>(values[i]) << ' ';
     stream << "... ";
     for (size_t i = values.size() - c_value_count / 2; i < values.size(); i++)
-      stream << values[i] << ' ';
+      stream << static_cast<DisplayType>(values[i]) << ' ';
   }
 }
 

@@ -19,11 +19,12 @@ struct Whisper_Model : Model {
 
 struct Whisper_State : State {
   Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params);
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetOutput(const char* name) override;
 
  private:
-  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
+  void Initialize(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices);
   void Finalize() override;
 
   const Whisper_Model& model_;
@@ -33,10 +34,10 @@ struct Whisper_State : State {
     Decoder,
   } run_state_{RunState::Encoder_Decoder_Init};
 
-  InputIDs decoder_input_ids_{*this};
+  DefaultInputIDs decoder_input_ids_{*this};
   Logits logits_{*this};
-  KV_Cache kv_cache_{*this};
-  Cross_Cache cross_cache_{*this};
+  DefaultKeyValueCache kv_cache_{*this};
+  CrossCache cross_cache_{*this};
   std::unique_ptr<OrtValue> encoder_input_ids_;
   std::unique_ptr<OrtValue> encoder_hidden_states_;
 
