@@ -13,6 +13,7 @@
 #include <iostream>
 #include "span.h"
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -23,16 +24,11 @@
 #include <unordered_set>
 #include <variant>
 #include <vector>
-#if USE_CUDA
-#include <cuda_runtime.h>
-#else
-// If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
-using cudaStream_t = void*;
-#endif
 
 #include "leakcheck.h"
-#include "smartptrs.h"
+#include "make_string.h"
 #include "models/onnxruntime_api.h"
+#include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
@@ -46,72 +42,65 @@ struct Model;
 struct State;
 struct Search;
 struct Tokenizer;
+struct ConstrainedLogitsProcessor;
+struct ExtraInput {  // Extra inputs provided via SetInputs()
+  std::string name;
+  std::shared_ptr<Tensor> tensor;
+};
+
+template <typename T, typename V>
+bool contains(const T& t, V&& v) {
+  return std::find(t.begin(), t.end(), v) != t.end();
+}
 
 template <typename T>
 DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
-  return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), value.GetTensorTypeAndShapeInfo()->GetElementCount()});
+  auto info = value.GetTensorTypeAndShapeInfo();
+  assert(info->GetElementType() == Ort::TypeToTensorType<std::remove_const_t<T>>);
+  return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), info->GetElementCount()});
 }
+
+DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
-enum struct DeviceType {
-  CPU,
-  CUDA,
-  DML,
-  WEBGPU,
-  QNN,
-};
-
 std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
 
-struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams>, ExternalRefCounted<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
   const Config& config;                  // The model outlives the GeneratorParams
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
+  // Query the params to get the value set for a param
+  double GetSearchNumber(std::string_view name) const;
+  bool GetSearchBool(std::string_view name) const;
+
   int max_batch_size{0};
-  bool use_cuda_graph{};
+  bool use_graph_capture{};
+  bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
-  DeviceInterface* p_device{};
-  DeviceType device_type{DeviceType::CPU};
-  cudaStream_t cuda_stream{};
+  DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
-  cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
+  std::string guidance_type;               // e.g. json_schema or regex
+  std::string guidance_data;               // e.g. rules data in json_schema or regex
+  bool guidance_ff_tokens_enabled{false};  // Whether to enable ff_tokens during constrained decoding
+  void SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens);
 
-  struct Whisper {
-    std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
-    std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
-  };
-
-  std::variant<Whisper> inputs;
-
-  std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
-
-  struct Input {
-    std::string name;
-    std::shared_ptr<Tensor> tensor;
-  };
-
-  // A list of extra model inputs that will be matched at runtime based on name
-  std::vector<Input> extra_inputs;
-
-  void TryGraphCapture(int max_bs);
-
-  void SetInputs(const NamedTensors& inputs);
-
- private:
-  bool is_cuda_graph_enabled_{};
+  // Determines if past_present_share_buffer is actually enabled based on config and runtime conditions
+  // Returns true only if config option is true AND (num_beams == 1 OR model is Whisper)
+  bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
-  bool IsDone() const;
+  bool IsDone();
+  size_t TokenCount() const;
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
@@ -122,14 +111,20 @@ struct Generator : LeakChecked<Generator> {
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
+  // A list of extra model inputs that will be matched at runtime based on name
+  std::vector<ExtraInput> extra_inputs_;
+  void SetInputs(const NamedTensors& inputs);
+
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
-  bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+  std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
+
+  bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+  bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
-  void AuxAppendTokens(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken
@@ -141,10 +136,21 @@ struct OrtGlobals {
   OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
-#if USE_CUDA
-  std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  std::unique_ptr<Ort::Allocator> allocator_cuda_;
-#endif
+
+  struct Allocator {
+    std::unique_ptr<Ort::Allocator> allocator_;
+    std::unique_ptr<OrtSession> session_;
+  };
+  Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
+
+  // Cache for dynamically built graph sessions (e.g., Cast, TopK operations)
+  // Destroyed before env_ to ensure proper cleanup order
+  struct SessionCache {
+    std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions_;
+    std::mutex mutex_;
+  };
+  SessionCache graph_session_cache_;
+
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
@@ -160,7 +166,11 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 
+// Fallback to copy between two separate device buffers by going through CPU memory (slow unless we're the CPU device)
+void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes);
+
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);
+
+std::unique_ptr<Search> CreateSearch(const GeneratorParams& params);
 
 }  // namespace Generators

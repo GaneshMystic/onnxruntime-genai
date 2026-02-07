@@ -6,16 +6,17 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IncludeMobileTargets)' == 'true'">
-    <MobileTargets>net8.0-android;net8.0-ios;net8.0-maccatalyst</MobileTargets>
+    <MobileTargets>net9.0-android;net9.0-ios;net9.0-maccatalyst</MobileTargets>
   </PropertyGroup>
 
   <PropertyGroup>
     <TargetFrameworks>$(BaseTargets);$(MobileTargets)</TargetFrameworks>
     <Platforms>AnyCPU</Platforms>
-    <LangVersion>default</LangVersion>
+    <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>onnxruntime-genai.snk</AssemblyOriginatorKeyFile>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
 
     <!--internal build related properties-->
     <SrcRoot>$(ProjectDir)..\..\src</SrcRoot>
@@ -119,6 +120,10 @@
 
   <ItemGroup Condition="'$(TargetFramework)'=='netstandard2.0'">
     <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="9.8.0" />
   </ItemGroup>
 
 </Project>

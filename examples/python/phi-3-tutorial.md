@@ -66,11 +66,11 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for main is given below).
 
    ```bash
-   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m directml\directml-int4-awq-block-128
+   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
+   python model-qa.py -m directml\directml-int4-awq-block-128 -e dml
    ```
 
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
@@ -105,11 +105,11 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for main is given below).
 
    ```bash
-   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m cuda/cuda-int4-rtn-block-32 
+   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
+   python model-qa.py -m cuda/cuda-int4-rtn-block-32 -e cuda
    ```
 
       Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
@@ -138,11 +138,11 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for main is given below).
 
    ```bash
-   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4
+   curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
+   python model-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4 -e cpu
    ```
 
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:

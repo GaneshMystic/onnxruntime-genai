@@ -5,7 +5,6 @@ import logging
 import os
 import subprocess
 import sys
-from typing import Dict, List, Optional, Union
 
 
 def is_windows():
@@ -13,13 +12,13 @@ def is_windows():
 
 
 def run_subprocess(
-    args: List[str],
-    cwd: Optional[Union[str, bytes, os.PathLike]] = None,
+    args: list[str],
+    cwd: str | bytes | os.PathLike | None = None,
     capture: bool = False,
-    dll_path: Optional[Union[str, bytes, os.PathLike]] = None,
+    dll_path: str | bytes | os.PathLike | None = None,
     shell: bool = False,
-    env: Dict[str, str] = {},
-    log: Optional[logging.Logger] = None,
+    env: dict[str, str] = {},
+    log: logging.Logger | None = None,
 ):
     if log:
         log.info(f"Running subprocess in '{cwd or os.getcwd()}'\n{args}")
@@ -46,42 +45,56 @@ def run_subprocess(
     )
 
     if log:
-        log.debug(
-            "Subprocess completed. Return code=" + str(completed_process.returncode)
-        )
+        log.debug("Subprocess completed. Return code=" + str(completed_process.returncode))
     return completed_process
 
 
+def get_ci_data_path():
+    if is_windows():
+        ci_data_path = os.path.join(R"C:\\", "data", "models", "ortgenai")
+    else:
+        ci_data_path = os.path.join(os.path.abspath(os.sep), "data", "ortgenai")
+    return ci_data_path
+
+
 def get_model_paths():
+    # TODO: Uncomment the following models as needed in the CI pipeline.
+
+    # Format: model alias: (HF repo name, create only 1 layer)
     hf_paths = {
-        "phi-2": "microsoft/phi-2",
-        # "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
+        # "olmo": "amd/AMD-OLMo-1B-SFT-DPO",
+        # "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
+        # "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
+        # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
+        "phi-4-mini": ("microsoft/Phi-4-mini-instruct", True),
+        "qwen-2.5-0.5b": ("Qwen/Qwen2.5-0.5B-Instruct", False),
     }
 
-    ci_data_path = os.path.join("/", "data", "ortgenai", "pytorch")
+    ci_data_path = os.path.join(get_ci_data_path(), "pytorch")
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
 
     # Note: If a model has over 4B parameters, please add a quantized version
     # to `ci_paths` instead of `hf_paths` to reduce file size and testing time.
+    # Format: model alias: (OS path, create only 1 layer)
     ci_paths = {
-        "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
-        "llama-3": os.path.join(ci_data_path, "Meta-Llama-3-8B-AWQ"),
-        "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
-        "phi-2": os.path.join(ci_data_path, "phi2"),
-        "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
-        "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
-        "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
-        "gemma-2-2b": os.path.join(ci_data_path, "gemma-2-2b-it"),
-        "llama-3.2": os.path.join(ci_data_path, "llama-3.2b-1b-instruct"),
-        "qwen-2.5": os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"),
-        "nemotron-mini": os.path.join(ci_data_path, "nemotron-mini-4b"),
+        # "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
+        # "llama-3": os.path.join(ci_data_path, "Meta-Llama-3-8B-AWQ"),
+        # "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
+        "phi-2": (os.path.join(ci_data_path, "phi2"), True),
+        # "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
+        # "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
+        # "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
+        # "gemma-2-2b": os.path.join(ci_data_path, "gemma-2-2b-it"),
+        # "llama-3.2": os.path.join(ci_data_path, "llama-3.2b-1b-instruct"),
+        # "qwen-2.5-0.5b": os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"),
+        # "nemotron-mini": os.path.join(ci_data_path, "nemotron-mini-4b"),
     }
 
     return ci_paths, hf_paths
 
 
-def download_model(model_name, input_path, output_path, precision, device, one_layer=True):
+def download_model(model_name, input_path, output_path, precision, device, one_layer):
     command = [
         sys.executable,
         "-m",
@@ -108,7 +121,7 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
         device,
     ]
 
-    extra_options = ["--extra_options", "include_hidden_states=true"]
+    extra_options = ["--extra_options", "include_hidden_states=1", "hf_token=0", "hf_remote=0"]
     if device == "cpu" and precision == "int4":
         extra_options += ["int4_accuracy_level=4"]
     if one_layer:
@@ -119,22 +132,46 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     run_subprocess(command).check_returncode()
 
 
-def download_models(download_path, precision, device):
+def download_models(download_path, precision, device, log):
+    log.debug(f"Downloading models to {download_path} with precision {precision} and device {device}")
+
     ci_paths, hf_paths = get_model_paths()
     output_paths = []
-    
+
+    log.debug(f"Downloading {len(ci_paths)} PyTorch models and {len(hf_paths)} Hugging Face models")
+
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
-    for model_name, input_path in ci_paths.items():
-        output_path = os.path.join(download_path, model_name, precision, device)
-        if not os.path.exists(output_path):
-            download_model(None, input_path, output_path, precision, device)
-            output_paths.append(output_path)
+    for model_name, (input_path, one_layer) in ci_paths.items():
+        try:
+            output_path = os.path.join(download_path, model_name, precision, device)
+            log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
+            if not os.path.exists(output_path):
+                download_model(None, input_path, output_path, precision, device, one_layer)
+                output_paths.append(output_path)
+        except Exception as e:
+            log.warning(f"Error: {e}. Skipping CI model.")
+            continue
 
     # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
-    for model_name, hf_name in hf_paths.items():
+    for model_name, (hf_name, one_layer) in hf_paths.items():
+        try:
+            from huggingface_hub import model_info
+
+            model_info(hf_name)
+        except ImportError:
+            log.warning("huggingface_hub is not installed. Skipping downloading hugging face models.")
+            continue
+        except Exception as e:
+            log.warning(f"Error: {e}. Skipping downloading hugging face models")
+            continue
         output_path = os.path.join(download_path, model_name, precision, device)
+
+        log.debug(f"Downloading {model_name} from {hf_name} to {output_path}")
+
         if not os.path.exists(output_path):
-            download_model(hf_name, "", output_path, precision, device)
+            download_model(hf_name, "", output_path, precision, device, one_layer)
             output_paths.append(output_path)
+
+    log.info(f"Successfully downloaded {len(output_paths)} models")
 
     return output_paths

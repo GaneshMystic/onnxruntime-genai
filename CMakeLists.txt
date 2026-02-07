@@ -29,9 +29,76 @@ if(MSVC)
   # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
   # Remove this definition once the conda msvcp140.dll dll is updated.
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+
+  # Add compiler options for security standards
+  # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
+
+  # Explicitly enable (/GS) stack protection to pass BinSkim checks
+  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/GS>")
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/GS>")
+
+  # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
+  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/guard:cf>")
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/guard:cf>")
+  add_link_options(/guard:cf /DYNAMICBASE)
+
+  # Determine the target platform (from MSBuild generator)
+  if (CMAKE_VS_PLATFORM_NAME)
+    set(onnxruntime_target_platform ${CMAKE_VS_PLATFORM_NAME})
+  else()
+    set(onnxruntime_target_platform ${CMAKE_SYSTEM_PROCESSOR})
+  endif()
+
+  # Enable CET shadow stack unless building for ARM64 (not supported there)
+  if (onnxruntime_target_platform STREQUAL "x64" OR
+      onnxruntime_target_platform STREQUAL "Win32" OR
+      onnxruntime_target_platform STREQUAL "x86")
+    add_link_options("/CETCOMPAT")
+    message(STATUS "CET shadow stack enabled (/CETCOMPAT).")
+  else()
+    message(STATUS "CET shadow stack skipped.")
+  endif()
+
+  # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc that is not supported there)
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
+  )
+
+  # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
+  # Required by some libraries/tools that check __cplusplus for feature support
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+
+  add_compile_options(
+    # Suppress warning C5038: data member will be initialized after another
+    # Common when member initializer list is written out-of-order vs. declaration
+    "$<$<COMPILE_LANGUAGE:C>:/w15038>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/w15038>"
+
+    # Suppress warning C4100: unreferenced formal parameter
+    # Often appears in template or virtual function overrides where a param is unused
+    "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
+
+    # Suppress warning C4819: file contains character that cannot be represented in current code page
+    "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
+
+    # Enable warning level 4 (more aggressive than default /W3)
+    # Captures more potential bugs or code smells
+    "$<$<COMPILE_LANGUAGE:C>:/W4>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
+
+    # Treat all warnings as errors (fail build on any warning)
+    # Combine carefully with /W4 — suppress any known false positives
+    "$<$<COMPILE_LANGUAGE:C>:/WX>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
+  )
 endif()
 
 include(cmake/ortlib.cmake)
+
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
@@ -41,23 +108,12 @@ include(cmake/check_cuda.cmake)
 include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
-# Checking if WebGpu is supported
-include(cmake/check_webgpu.cmake)
 
 include(cmake/cxx_standard.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
-if(MSVC)
-  # set updated value for __cplusplus macro instead of 199711L
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 
-  add_compile_options(
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4100>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
-  )
-endif()
+add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
 
 # Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
 # MacCatalyst is not well supported in CMake
@@ -72,11 +128,16 @@ if(ENABLE_TESTS)
   # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
   # it applies recursively to all subdirectories
   enable_testing()
-  if (USE_CUDA OR TEST_PHI2)
+  if (TEST_PHI2)
     add_compile_definitions(TEST_PHI2=1)
   else()
     add_compile_definitions(TEST_PHI2=0)
   endif()
+endif()
+
+if(ENABLE_TRACING)
+  message(STATUS "Tracing is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TRACING)
 endif()
 
 find_package(Threads REQUIRED)
@@ -89,24 +150,18 @@ if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
-
-  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 else()
   add_library(onnxruntime-genai SHARED ${generator_srcs})
-  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 endif()
 
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
-target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
-target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
+target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
-target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
-target_link_libraries(onnxruntime-genai-static PUBLIC Threads::Threads)
+
+# The genai library itself is always embedded in the shared library
+list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
@@ -114,6 +169,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
   target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+  if(USE_WINML)
+    target_link_options(onnxruntime-genai PRIVATE "/DELAYLOAD:${ONNXRUNTIME_LIB}")
+  endif()
 endif()
 
 if(APPLE)
@@ -122,8 +180,28 @@ endif()
 
 
 # Build all source files using CUDA as a separate shared library we dynamically load at runtime
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
+if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
+  # Suppress nvcc warnings:
+  # 1650 = "result of call is not used"
+  # 221  = "floating-point value does not fit in required floating-point type"
+  # Also suppress deprecated GPU targets warnings for CUDA 12.8+
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1650>
+    $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=221>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>
+  )
+  
+  if(WIN32)
+    add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs} "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_MINOR=${VERSION_MINOR})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_PATCH=${VERSION_PATCH})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
+    target_compile_definitions(onnxruntime-genai-cuda PRIVATE FILE_NAME=\"onnxruntime-genai-cuda.dll\")
+  else()
+    add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
+  endif()
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
   target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
@@ -142,36 +220,35 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   endif()
 endif()
 
+
+if(USE_GUIDANCE)
+  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  target_link_libraries(onnxruntime-genai PRIVATE llguidance)
+  if (WIN32)
+    # bcrypt is needed for the rust std lib
+    target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
+  endif()
+endif()
+
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
-  target_link_options(onnxruntime-genai PRIVATE "/CETCOMPAT")
   target_compile_options(onnxruntime-genai PRIVATE "/sdl")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(onnxruntime-genai-static PRIVATE dl)  # For dlopen & co
+  set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(onnxruntime-genai PUBLIC dl)  # For dlopen & co
 endif()
-
 
 if(USE_DML)
   list(APPEND ortgenai_embed_libs "${D3D12_LIB_DIR}/D3D12Core.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
-  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE ${DML_HEADER_DIR})
-  target_include_directories(onnxruntime-genai-static PRIVATE ${DML_HEADER_DIR})
   target_include_directories(onnxruntime-genai PRIVATE ${D3D12_HEADER_DIR})
-  target_include_directories(onnxruntime-genai-static PRIVATE ${D3D12_HEADER_DIR})
   target_link_directories(onnxruntime-genai PRIVATE ${DML_LIB_DIR})
   target_link_directories(onnxruntime-genai PRIVATE ${D3D12_LIB_DIR})
-  target_link_directories(onnxruntime-genai-static PUBLIC ${DML_LIB_DIR})
-  target_link_directories(onnxruntime-genai-static PUBLIC ${D3D12_LIB_DIR})
   target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
-  target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
-  target_link_libraries(onnxruntime-genai-static PUBLIC d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
 
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
@@ -196,13 +273,17 @@ if(USE_DML)
 
   add_dependencies(RESTORE_PACKAGES nuget)
   add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
-  add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
 if(ANDROID)
   # strip the binary if it's not a build with debug info
   set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
   set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_MINSIZEREL -s)
+
+  # Build shared libraries with support for 16 KB page size on Android
+  # https://source.android.com/docs/core/architecture/16kb-page-size/16kb#build-lib-16kb-alignment
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+  set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 endif()
 
 if(ENABLE_TESTS)

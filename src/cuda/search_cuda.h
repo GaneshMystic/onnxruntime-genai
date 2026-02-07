@@ -1,6 +1,10 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #pragma once
+#include <cuda_runtime.h>
 #include "search_cuda.cuh"
-#include "cuda_sampling.cuh"
+#include "cuda_sampling.h"
 
 namespace Generators {
 
@@ -12,9 +16,10 @@ struct Search_Cuda : Search {
   DeviceSpan<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
 
   bool IsDone() const {
-    cudaStreamSynchronize(params_->cuda_stream);
+    cudaStreamSynchronize(GetStream());
     return *done_cpu_;
   }  // TODO: Use an event
+  void ResetDone();
 
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
@@ -27,8 +32,9 @@ struct Search_Cuda : Search {
 
   DeviceSpan<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
 
-  gpu_span<bool> eos_meet_;  // shape (beam_size*batch_size)
-  cuda_unique_ptr<bool> eos_meet_buffer_;
+  gpu_span<bool> eos_seen_;  // shape (beam_size*batch_size)
+  cuda_unique_ptr<bool> eos_seen_buffer_;
+  DeviceSpan<int32_t> eos_token_ids_;
 
   gpu_span<int32_t> next_tokens_;        // shape (beam_size*batch_size)
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
@@ -43,13 +49,14 @@ struct GreedySearch_Cuda : Search_Cuda {
   DeviceSpan<int32_t> GetNextIndices() override { return {}; }
 
   void SelectTop() override { SampleTopKTopP(1, 0.0, 1.0); }
-  void SampleTopK(int k, float t) override { SampleTopKTopP(k, 0.0, t); }
+  void SampleTopK(int k, float t) override { SampleTopKTopP(k, 1.0, t); }
   void SampleTopP(float p, float t) override { SampleTopKTopP(-1, p, t); }
   void SampleTopKTopP(int k, float p, float t) override;
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 
  private:
+  DeviceSpan<uint8_t> sampling_buffer_;
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
   std::unique_ptr<cuda::SamplingData> samplingdata_;

@@ -3,67 +3,126 @@ cmake_minimum_required(VERSION 3.18.1)
 project(ortgenaiapp)
 set(CMAKE_CXX_STANDARD 20)
 
-option(USE_CUDA "Build with CUDA support" OFF)
+# Download and make available nlohmann/json
+include(FetchContent)
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.12.0     # Or update to latest release
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+# Download and make available CLI11
+include(FetchContent)
+FetchContent_Declare(
+  CLI11
+  GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+  GIT_TAG        v2.6.1      # Or update to latest release
+)
+FetchContent_MakeAvailable(CLI11)
+
 option(USE_CXX "Invoke the C++ example" ON)
-option(PHI3 "Build the Phi example" OFF)
-option(PHI3V "Build the Phi3v example" OFF)
+option(MODEL_CHAT "Build the Model Chat example" OFF)
+option(MODEL_QA "Build the Model Q&A example" OFF)
+option(MODEL_MM "Build the Model Multimodal example" OFF)
 option(WHISPER "Build the Whisper example" OFF)
 
 if(USE_CXX)
   add_compile_definitions(USE_CXX)
 endif()
 
-if(USE_CUDA)
-  include(CheckLanguage)
-  enable_language(CUDA)
-endif()
-
-set(ORT_GENAI_LIB_DIR ${CMAKE_SOURCE_DIR}/lib)
-
+# Set expected library filenames
 if(WIN32)
-  set(ONNXRUNTIME_GENAI_LIB "onnxruntime-genai.dll")
-  set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dll")
+  set(ORT_LIB_FILE "onnxruntime.dll")
+  set(OGA_LIB_FILE "onnxruntime-genai.dll")
 elseif(APPLE)
-  set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.dylib")
-  set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dylib")
+  set(ORT_LIB_FILE "libonnxruntime.dylib")
+  set(OGA_LIB_FILE "libonnxruntime-genai.dylib")
+elseif(CMAKE_SYSTEM_NAME MATCHES "AIX")
+  set(ORT_LIB_FILE "libonnxruntime.a")
+  set(OGA_LIB_FILE "libonnxruntime-genai.a")
 else()
-  set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.so")
-  set(ONNXRUNTIME_GENAI_DEPENDENCY "*.so")
+  set(ORT_LIB_FILE "libonnxruntime.so")
+  set(OGA_LIB_FILE "libonnxruntime-genai.so")
 endif()
 
-file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/${ONNXRUNTIME_GENAI_DEPENDENCY}")
+# Set default variables to examples/c/include and examples/c/lib if not specified
+if(NOT ORT_INCLUDE_DIR)
+  set(ORT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
+endif()
+if(NOT OGA_INCLUDE_DIR)
+  set(OGA_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
+endif()
+if(NOT ORT_LIB_DIR)
+  set(ORT_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
+endif()
+if(NOT OGA_LIB_DIR)
+  set(OGA_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
+endif()
+
+# Store all library files in each directory
+file(GLOB ort_libs "${ORT_LIB_DIR}/*")
+file(GLOB oga_libs "${OGA_LIB_DIR}/*")
 
 function(prepare_executable executable)
-  target_link_directories(${executable} PRIVATE ${ORT_GENAI_LIB_DIR})
-  target_link_libraries(${executable} PRIVATE ${ONNXRUNTIME_GENAI_LIB})
-  target_include_directories(${executable} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  # Link directory and library for ORT and ORT GenAI
+  target_link_directories(${executable} PRIVATE ${ORT_LIB_DIR})
+  target_link_libraries(${executable} PRIVATE ${ORT_LIB_FILE})
+  target_link_directories(${executable} PRIVATE ${OGA_LIB_DIR})
+  target_link_libraries(${executable} PRIVATE ${OGA_LIB_FILE})
 
-  if(USE_CUDA)
-    set_target_properties(${executable} PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(${executable} PRIVATE cublas curand cudart)
-  endif()
+  # Add include directories for each executable
+  target_include_directories(${executable} PRIVATE ${ORT_INCLUDE_DIR})
+  target_include_directories(${executable} PRIVATE ${OGA_INCLUDE_DIR})
 
+  target_link_libraries(${executable} PUBLIC onnxruntime)
   target_link_libraries(${executable} PUBLIC onnxruntime-genai)
 
-  foreach(DLL_FILE ${ort_genai_libs})
-    add_custom_command(
-      TARGET ${executable} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:${executable}>
-    )
+  foreach(DEPENDENCY_FILE ${ort_libs})
+    if (NOT IS_DIRECTORY ${DEPENDENCY_FILE})
+      add_custom_command(
+        TARGET ${executable} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
+      )
+    endif()
+  endforeach()
+
+  foreach(DEPENDENCY_FILE ${oga_libs})
+    if (NOT IS_DIRECTORY ${DEPENDENCY_FILE})
+      add_custom_command(
+        TARGET ${executable} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
+      )
+    endif()
   endforeach()
 endfunction()
 
-if(PHI3)
-  add_executable(phi3 ${CMAKE_SOURCE_DIR}/src/phi3.cpp)
-  prepare_executable(phi3)
+set(EXAMPLES_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src)
+
+if(MODEL_CHAT)
+  add_executable(model_chat ${EXAMPLES_SOURCE_DIR}/model_chat.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
+  prepare_executable(model_chat)
+  target_link_libraries(model_chat PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(model_chat PRIVATE CLI11::CLI11)
 endif()
 
-if(PHI3V)
-  add_executable(phi3v ${CMAKE_SOURCE_DIR}/src/phi3v.cpp)
-  prepare_executable(phi3v)
+if(MODEL_QA)
+  add_executable(model_qa ${EXAMPLES_SOURCE_DIR}/model_qa.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
+  prepare_executable(model_qa)
+  target_link_libraries(model_qa PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(model_qa PRIVATE CLI11::CLI11)
+endif()
+
+if(MODEL_MM)
+  add_executable(model_mm ${EXAMPLES_SOURCE_DIR}/model_mm.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
+  prepare_executable(model_mm)
+  target_link_libraries(model_mm PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(model_mm PRIVATE CLI11::CLI11)
 endif()
 
 if(WHISPER)
-  add_executable(whisper ${CMAKE_SOURCE_DIR}/src/whisper.cpp)
+  add_executable(whisper ${EXAMPLES_SOURCE_DIR}/whisper.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
   prepare_executable(whisper)
+  target_link_libraries(whisper PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(whisper PRIVATE CLI11::CLI11)
 endif()

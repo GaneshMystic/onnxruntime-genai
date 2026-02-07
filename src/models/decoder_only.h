@@ -18,21 +18,25 @@ struct DecoderOnly_Model : Model {
 
 struct DecoderOnly_State : State {
   DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params);
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
 
   void RewindTo(size_t index) override;
 
  private:
+  DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                    DeviceSpan<int32_t> next_indices, size_t chunk_size);
+
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
 
   const DecoderOnly_Model& model_;
-  CapturedGraphInfoPtr captured_graph_info_;
 
   DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
-  DefaultKeyValueCache kv_cache_{*this};
-  DefaultPositionInputs position_inputs_;
+  std::unique_ptr<KeyValueCache> kv_cache_;
+  std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
 

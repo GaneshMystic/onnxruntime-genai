@@ -30,6 +30,22 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
+- (BOOL)setInputs:(OGANamedTensors*)namedTensors error:(NSError**)error {
+  try {
+    _generator->SetInputs([namedTensors CXXAPIOgaNamedTensors]);
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+- (BOOL)setModelInput:(NSString*)name tensor:(OGATensor*)tensor error:(NSError**)error {
+  try {
+    _generator->SetModelInput([name UTF8String], [tensor CXXAPIOgaTensor]);
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
 - (BOOL)appendTokenSequences:(OGASequences*)sequences error:(NSError**)error {
   try {
     _generator->AppendTokenSequences([sequences CXXAPIOgaSequences]);
@@ -51,6 +67,13 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
+- (size_t)tokenCount:(NSError**)error {
+  try {
+    return _generator->TokenCount();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
+}
+
 - (BOOL)rewindTo:(size_t)newLength error:(NSError**)error {
   try {
     _generator->RewindTo(newLength);
@@ -65,6 +88,14 @@
     return YES;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+- (nullable OGATensor*)getInput:(NSString*)name error:(NSError**)error {
+  try {
+    std::unique_ptr<OgaTensor> input = _generator->GetInput([name UTF8String]);
+    return [[OGATensor alloc] initWithCXXPointer:std::move(input)];
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 - (nullable OGATensor*)getOutput:(NSString*)name error:(NSError**)error {
@@ -86,7 +117,7 @@
   try {
     return _generator->GetSequenceCount(index);
   }
-  OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_SIZE_T(error)
 }
 
 + (void)shutdown {

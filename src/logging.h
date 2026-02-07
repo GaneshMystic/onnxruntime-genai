@@ -24,8 +24,11 @@
  */
 namespace Generators {
 
+using CallbackFn = void (*)(const char* string, size_t length);
+
 void SetLogBool(std::string_view name, bool value);
 void SetLogString(std::string_view name, std::string_view value);
+void SetLogCallback(CallbackFn callback);
 
 struct LogItems {
   // Special log related entries
@@ -43,6 +46,7 @@ struct LogItems {
   bool model_output_values{};  // After the model runs the output tensor values can be displayed
   bool model_logits{};         // Same as model_output_values but only for the logits
   bool ort_lib{};              // Log the onnxruntime library loading and api calls.
+  bool value_stats{true};      // When logging float values, also dump some basic stats about the values (min, max, mean, std dev, and if there are any NaN or Inf values)
 };
 
 extern LogItems g_log;

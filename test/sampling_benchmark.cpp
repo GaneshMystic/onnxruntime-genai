@@ -2,94 +2,39 @@
 // Licensed under the MIT License.
 
 #include <gtest/gtest.h>
-#include <generators.h>
-#include <search.h>
-#include <models/model.h>
-#include <iostream>
-#include <random>
+
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <iomanip>
+#include <iostream>
+#include <numeric>
+#include <random>
+#include <string>
+#include <vector>
+
+#define OGA_USE_SPAN 1
+#include "../src/span.h"
+#include <ort_genai.h>
+#include "statistics_helper.h"
 
 // Our working directory is generators/build so one up puts us in the root directory:
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
+// External global variable from main.cpp for custom model path
+extern std::string g_custom_model_path;
+
 // Defined in sampling_tests.cpp
 void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine);
-
-struct SamplingBenchmark {
-  void Run() {
-    std::vector<int32_t> input_ids;
-    for (int i = 0; i < batch_size_; i++)
-      input_ids.push_back(i);
-
-    auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-
-    Generators::Config config;
-    config.model.vocab_size = 32000;  // vocab size of llama
-
-    auto params = Generators::CreateGeneratorParams(config);
-    params->search.max_length = 10;
-    params->search.batch_size = batch_size_;
-    params->p_device = Generators::GetDeviceInterface(device_type_);
-    params->device_type = device_type_;
-
-    std::random_device rd;
-    std::mt19937 engine(rd());
-    std::uniform_int_distribution<> dist(5, 25);
-    double total_time = 0.0;
-    int num_iter = 1000;
-
-    auto logits = params->p_device->Allocate<float>(static_cast<size_t>(config.model.vocab_size) * batch_size_);
-    auto test_start = std::chrono::high_resolution_clock::now();
-
-    for (int i = 0; i < num_iter; i++) {
-      auto generator = Generators::CreateGenerator(*model, *params);
-      int num_large = dist(engine);
-      CreateRandomLogits(logits.CpuSpan().data(), num_large, config.model.vocab_size, batch_size_, engine);
-      logits.CopyCpuToDevice();
-      generator->search_->SetLogits(logits);
-      params->p_device->Synchronize();
-      auto start = std::chrono::high_resolution_clock::now();
-      benchmark_function_(*generator);
-      params->p_device->Synchronize();
-      auto stop = std::chrono::high_resolution_clock::now();
-      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-      total_time += duration.count();
-      if (std::chrono::high_resolution_clock::now() - test_start > std::chrono::minutes(1)) {
-        std::cout << Generators::SGR::Bg_Red << " ABORTING " << Generators::SGR::Reset << " loop due to slow performance(took more than 1 minute) on iteration " << i << std::endl;
-        break;
-      }
-    }
-    double average_time = total_time / double(num_iter);
-    std::cout << "Average time taken: " << average_time << " microseconds" << std::endl;
-  }
-
-  std::function<void(Generators::Generator&)> benchmark_function_;
-  int batch_size_{1};
-  Generators::DeviceType device_type_{Generators::DeviceType::CPU};
-};
-
-static const char* DeviceTypeToString(Generators::DeviceType device_type) {
-  switch (device_type) {
-    case Generators::DeviceType::CPU:
-      return "CPU";
-    case Generators::DeviceType::CUDA:
-      return "CUDA";
-    case Generators::DeviceType::DML:
-      return "DML";
-    case Generators::DeviceType::WEBGPU:
-      return "WEBGPU";
-    default:
-      return "Unknown";
-  }
-}
 
 enum struct BenchmarkFunction {
   TopP,
   TopK,
   TopKTopP,
-  SelectTop
 };
 
 static const char* BenchmarkFunctionToString(BenchmarkFunction function) {
@@ -100,64 +45,175 @@ static const char* BenchmarkFunctionToString(BenchmarkFunction function) {
       return "TopK";
     case BenchmarkFunction::TopKTopP:
       return "TopKTopP";
-    case BenchmarkFunction::SelectTop:
-      return "SelectTop";
     default:
       return "Unknown";
   }
 }
 
-std::function<void(Generators::Generator&)> GetBenchmarkFunction(BenchmarkFunction function) {
-  switch (function) {
-    case BenchmarkFunction::TopP:
-      return [](Generators::Generator& generator) { generator.search_->SampleTopP(0.95f, 1.0f); };
-    case BenchmarkFunction::TopK:
-      return [](Generators::Generator& generator) { generator.search_->SampleTopK(5, 1.0f); };
-    case BenchmarkFunction::TopKTopP:
-      return [](Generators::Generator& generator) { generator.search_->SampleTopKTopP(5, 0.95f, 1.0f); };
-    case BenchmarkFunction::SelectTop:
-      return [](Generators::Generator& generator) { generator.search_->SelectTop(); };
-    default:
-      assert(false);
-      return nullptr;
-  }
-}
-
 struct BenchmarkParams {
-  Generators::DeviceType device_type;
+  const char* device_type;
   int batch_size;
+  int vocab_size;
+  int k;
   BenchmarkFunction benchmark_function;
-
-  std::string Name() const {
-    return std::string() + DeviceTypeToString(device_type) + "_BatchSize_" + std::to_string(batch_size) + "_" + BenchmarkFunctionToString(benchmark_function);
-  }
 };
 
-class SamplingBenchmarkTest : public ::testing::TestWithParam<BenchmarkParams> {};
+struct BenchmarkResult {
+  BenchmarkParams params;
+  float latency_us;
+  float latency_us_stdev;
+  float latency_us_95_percentile;
+};
 
-TEST_P(SamplingBenchmarkTest, RunBenchmark) {
-  SamplingBenchmark benchmark;
-  auto params = GetParam();
-  benchmark.device_type_ = params.device_type;
-  benchmark.benchmark_function_ = GetBenchmarkFunction(params.benchmark_function);
-  benchmark.batch_size_ = params.batch_size;
-  benchmark.Run();
+void PrintSummary(const std::vector<BenchmarkResult>& results) {
+  std::vector<BenchmarkResult> cpu_results;
+  std::vector<BenchmarkResult> cuda_results;
+
+  for (const auto& result : results) {
+    if (strcmp(result.params.device_type, "cpu") == 0) {
+      cpu_results.push_back(result);
+    } else {
+      cuda_results.push_back(result);
+    }
+  }
+
+  auto print_device_summary = [](const std::string& device_name, const std::vector<BenchmarkResult>& device_results) {
+    if (device_results.empty()) {
+      return;
+    }
+    // clang-format off
+    std::cout << "\n--- " << device_name << " Sampling Benchmark Summary ---\n";
+    std::cout << std::left
+              << std::setw(8) << "Batch"
+              << std::setw(12) << "Vocab"
+              << std::setw(5) << "K"
+              << std::setw(12) << "Function"
+              << std::setw(15) << "Latency(us)"
+              << std::setw(15) << "Stdev(us)"
+              << std::setw(15) << "P95(us)" << "\n";
+    std::cout << std::string(82, '-') << "\n";
+
+    for (const auto& result : device_results) {
+      std::cout << std::left << std::fixed << std::setprecision(2)
+                << std::setw(8) << result.params.batch_size
+                << std::setw(12) << result.params.vocab_size
+                << std::setw(5) << result.params.k
+                << std::setw(12) << BenchmarkFunctionToString(result.params.benchmark_function)
+                << std::setw(15) << result.latency_us
+                << std::setw(15) << result.latency_us_stdev
+                << std::setw(15) << result.latency_us_95_percentile
+                << "\n";
+    }
+    // clang-format on 
+  };
+
+  print_device_summary("CPU", cpu_results);
+  print_device_summary("CUDA", cuda_results);
 }
 
-auto benchmark_values = ::testing::Values(
-    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopP},
-    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopK},
-    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopKTopP}
-#if USE_CUDA
-    ,
-    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopP},
-    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopK},
-    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopKTopP},
-    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::SelectTop},
-    BenchmarkParams{Generators::DeviceType::CUDA, 6, BenchmarkFunction::SelectTop},
-    BenchmarkParams{Generators::DeviceType::CUDA, 12, BenchmarkFunction::SelectTop}
-#endif
-);
+BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
+  std::string model_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
+  if (strcmp(params.device_type, "NvTensorRtRtx") == 0) {
+    model_path = g_custom_model_path.empty() ? MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt" : g_custom_model_path;
+  }
+  auto config = OgaConfig::Create(model_path.c_str());
+  std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(params.vocab_size) + R"( } })";
+  config->Overlay(overlay.c_str());
+  config->ClearProviders();
+  if (strcmp(params.device_type, "cpu"))
+    config->AppendProvider(params.device_type);
 
-INSTANTIATE_TEST_SUITE_P(Benchmarks, SamplingBenchmarkTest, benchmark_values,
-                         [](const ::testing::TestParamInfo<BenchmarkParams>& info) { return info.param.Name(); });
+  auto model = OgaModel::Create(*config);
+  auto generator_params = OgaGeneratorParams::Create(*model);
+  generator_params->SetSearchOption("max_length", 10);
+  generator_params->SetSearchOption("batch_size", params.batch_size);
+  generator_params->SetSearchOptionBool("do_sample", true);
+
+  switch (params.benchmark_function) {
+    case BenchmarkFunction::TopP:
+      generator_params->SetSearchOption("top_p", 0.95f);
+      break;
+    case BenchmarkFunction::TopK:
+      generator_params->SetSearchOption("top_k", params.k);
+      break;
+    case BenchmarkFunction::TopKTopP:
+      generator_params->SetSearchOption("top_k", params.k);
+      generator_params->SetSearchOption("top_p", 0.95f);
+      break;
+  }
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<> dist(5, 25);
+  const int warm_up_runs = 5;
+  const int total_runs = 500;
+
+  std::vector<double> latencies;
+
+  const int64_t tensor_size = static_cast<int64_t>(params.batch_size) * static_cast<int64_t>(params.vocab_size);
+  std::vector<float> logits_data(tensor_size);
+  auto logits_tensor = OgaTensor::Create(
+      logits_data.data(),
+      std::array<int64_t, 2>{static_cast<int64_t>(params.batch_size), static_cast<int64_t>(params.vocab_size)});
+
+  for (int i = 0; i < warm_up_runs + total_runs; i++) {
+    auto generator = OgaGenerator::Create(*model, *generator_params);
+
+    int num_large = dist(engine);
+    CreateRandomLogits(logits_data.data(), num_large, params.vocab_size, params.batch_size, engine);
+    generator->SetLogits(*logits_tensor);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    generator->GenerateNextToken();
+    auto result = generator->GetNextTokens();
+    auto stop = std::chrono::high_resolution_clock::now();
+
+    if (i >= warm_up_runs) {
+      latencies.push_back(static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count()));
+    }
+  }
+
+  double mean_us = mean(latencies);
+  double stdev_us = stdev(latencies);
+  double p95_us = percentile(latencies, 95.0);
+
+  return {params, static_cast<float>(mean_us), static_cast<float>(stdev_us), static_cast<float>(p95_us)};
+}
+
+TEST(SamplingBenchmarks, PerformanceTests) {
+  std::vector<BenchmarkParams> test_cases;
+  std::vector<const char*> device_types = {"cpu"};
+#if USE_CUDA
+  device_types.push_back("cuda");
+#endif
+  // Add NvTensorRtRtx if model is available
+  std::string resolved_nvtrt_path = g_custom_model_path.empty() ? MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt" : g_custom_model_path;
+  if (std::filesystem::exists(resolved_nvtrt_path)) {
+    device_types.push_back("NvTensorRtRtx");
+  }
+
+  std::vector<int> batch_sizes = {1};
+  std::vector<int> vocab_sizes = {201088};
+  std::vector<int> ks = {1, 50};
+
+  for (const auto& device_type : device_types) {
+    for (int batch_size : batch_sizes) {
+      for (int vocab_size : vocab_sizes) {
+        test_cases.push_back({device_type, batch_size, vocab_size, 0, BenchmarkFunction::TopP});        
+        for (int k : ks) {
+          test_cases.push_back({device_type, batch_size, vocab_size, k, BenchmarkFunction::TopK});
+          if (k >= 20) {
+            test_cases.push_back({device_type, batch_size, vocab_size, k, BenchmarkFunction::TopKTopP});
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<BenchmarkResult> all_results;
+  for (const auto& params : test_cases) {
+    all_results.push_back(RunBenchmark(params));
+  }
+
+  PrintSummary(all_results);
+}

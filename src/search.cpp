@@ -2,16 +2,20 @@
 #include "softmax.h"
 #include "search.h"
 #include "beam_search_scorer.h"
+#include "cpu/interface.h"
 #include <queue>
 #include <algorithm>
+#include <limits>
+#include <unordered_set>
 
 namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
-    : Search{params} {
+    : Search{params},
+      cpu_device_{*GetCpuInterface()} {
   auto batch_beam_size = params.BatchBeamSize();
 
-  sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size);
+  sequence_lengths_ = cpu_device_.Allocate<int32_t>(batch_beam_size);
 }
 
 GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
@@ -21,14 +25,14 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
   else {
     std::random_device rd;
     std::array<uint32_t, decltype(gen_)::state_size> data;
-    std::generate(std::begin(data), std::end(data), std::ref(rd));
+    std::generate(data.begin(), data.end(), std::ref(rd));
     std::seed_seq seq(data.begin(), data.end());
     gen_.seed(seq);
   }
 
-  next_tokens_ptr_ = params.p_device->Allocate<int32_t>(params.search.batch_size);
+  next_tokens_ptr_ = cpu_device_.Allocate<int32_t>(params.search.batch_size);
+  next_tokens_ptr_.Zero();
   next_tokens_ = cpu_span<int32_t>(next_tokens_ptr_.Span());
-  memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 
   eos_seen_buffer_ = AllocateArray<bool>(params.search.batch_size, &eos_seen_);
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
@@ -45,12 +49,24 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
 
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
+void Search_Cpu::ResetDone() {
+  // Reset done count/state
+  done_ = false;
+}
+
+void GreedySearch_Cpu::ResetDone() {
+  Search_Cpu::ResetDone();
+  not_done_count_ = params_->search.batch_size;
+  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+}
+
 DeviceSpan<float> Search_Cpu::GetLogits() const {
   return next_token_scores_;
 }
 
 void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
+  next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
 }
 
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
@@ -66,7 +82,7 @@ DeviceSpan<int32_t> BeamSearch_Cpu::GetNextIndices() {
 }
 
 void BeamSearch_Cpu::SelectTop() {
-  auto next_token_scores = next_token_scores_.Span();
+  auto next_token_scores = next_token_scores_.CpuSpan();
 
   // Normalize next token scores
   for (size_t i = 0; i < params_->BatchBeamSize(); i++) {
@@ -145,85 +161,134 @@ void GreedySearch_Cpu::SelectTop() {
       continue;
     }
 
-    std::span<float> const scores = next_token_scores_.Span().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+    std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     auto const token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
     SetNextToken(batch_id, token);
   }
 
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
-    std::span<float> const scores = next_token_scores_.Span().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    SoftMax(scores, temperature);
+    if (PadIfAlreadyEOS(batch_id)) {
+      continue;
+    }
+    std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
+    std::vector<float> top_k_scores(k);
+    for (int i = 0; i < k; i++)
+      top_k_scores[i] = scores[indices[i]];
     // Sample a token from the top K
-    std::discrete_distribution<> dis(scores.begin(), scores.begin() + k);
+    Softmax(top_k_scores, temperature);
+    std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
     SetNextToken(batch_id, indices[dis(gen_)]);
   }
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
-  std::uniform_real_distribution<float> dis(0, p);
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.Span().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    SoftMax(scores, temperature);
-    // Sort an array of indices into the scores
+
+    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+
+    // 1. Apply temperature and softmax to get probabilities
+    Softmax(scores, temperature);
+
+    // 2. Sort indices by probability
     std::vector<int32_t> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-    // Sample a probability threshold
-    float threshold = dis(gen_);
-    int32_t token = 0;
-    // Find the first token where the cumulative probability exceeds the threshold
-    for (int i = 0; i < scores.size(); i++) {
-      threshold -= scores[indices[i]];
-      if (threshold > 0) {
-        continue;
+    std::sort(indices.begin(), indices.end(),
+              [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+
+    // 3. Find nucleus and mute probabilities of tokens outside it
+    float cumulative_prob = 0.0f;
+    for (size_t i = 0; i < indices.size(); ++i) {
+      cumulative_prob += scores[indices[i]];
+      if (cumulative_prob >= p) {
+        for (size_t j = i + 1; j < indices.size(); ++j) {
+          scores[indices[j]] = 0.0f;
+        }
+        break;
       }
-      token = indices[i];
-      break;
     }
+
+    // 4. Sample
+    std::discrete_distribution<> dist(scores.begin(), scores.end());
+    int32_t token = dist(gen_);
+
     SetNextToken(batch_id, token);
   }
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
-  std::uniform_real_distribution<float> dis(0, p);
+  assert(temperature > 0.0f);
+
+  // --- Buffers allocated once to avoid re-allocations in the batch loop ---
+  std::vector<int32_t> indices(params_->config.model.vocab_size);
+
+  // Buffer for the top-k logits
+  std::vector<float> top_k_logits;
+  top_k_logits.reserve(k);
+
+  // Buffer for probabilities used in Top-P filtering
+  std::vector<float> temp_probs;
+  temp_probs.reserve(k);
+
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.Span().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    SoftMax(scores, temperature);
-    // Find the top K scores
-    std::vector<int> indices(scores.size());
+
+    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+
     std::iota(indices.begin(), indices.end(), 0);
-    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-    // Sample a probability threshold
-    float threshold = dis(gen_);
-    int32_t token = indices[k - 1];
-    // Find the first token where the cumulative probability exceeds the threshold
-    for (int i = 0; i < k; i++) {
-      threshold -= scores[indices[i]];
-      if (threshold > 0) {
-        continue;
-      }
-      token = indices[i];
-      break;
+    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+                      [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+
+    // 2. Populate top K logits, applying temperature.
+    top_k_logits.clear();
+    for (int i = 0; i < k; ++i) {
+      top_k_logits.push_back(scores[indices[i]] / temperature);
     }
+
+    // 3. Top-p (nucleus) filtering.
+    temp_probs.assign(top_k_logits.begin(), top_k_logits.end());
+    Softmax(temp_probs, 1.0f);  // Temperature is already baked into top_k_logits
+
+    float cumulative_prob = 0.0f;
+    int cutoff_index = k;  // Default to keeping all top-k tokens
+    for (int i = 0; i < k; ++i) {
+      cumulative_prob += temp_probs[i];
+      if (cumulative_prob >= p) {
+        cutoff_index = i + 1;
+        break;
+      }
+    }
+
+    // 4. Resize logits to the nucleus, re-normalize, and sample.
+    top_k_logits.resize(cutoff_index);
+    Softmax(top_k_logits, 1.0f);
+
+    std::discrete_distribution<> dist(top_k_logits.begin(), top_k_logits.end());
+    int32_t sampled_k_index = dist(gen_);
+
+    // The final token is the one from the original vocab indices.
+    int32_t token = indices[sampled_k_index];
     SetNextToken(batch_id, token);
   }
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
@@ -238,7 +303,7 @@ bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
 
 void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
-  if (token == params_->config.model.eos_token_id) {
+  if (contains(params_->config.model.eos_token_id, token)) {
     eos_seen_[batch_id] = true;
     if (g_log.enabled && g_log.hit_eos)
       Log("hit_eos", "EOS seen on batch " + std::to_string(batch_id));
@@ -250,13 +315,14 @@ void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
 
 void GreedySearch_Cpu::AppendNextTokensToSequences() {
   // Append next token to each sequence.
-  auto sequences_span = sequences_.GetSequences().Span();
+  auto sequences_span = sequences_.GetSequences().CpuSpan();
   auto current_length = sequences_.GetSequenceLength();
-  auto next_tokens = next_tokens_ptr_.Span();
+  auto next_tokens = next_tokens_ptr_.Span();  // always on cpu
   auto batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     sequences_span[i * sequences_.max_length_ + current_length] = next_tokens[i];
   }
+  sequences_.GetSequences().CopyCpuToDevice();
 
   sequences_.AfterAppendNextTokens(next_tokens_ptr_, batch_beam_size);
 
@@ -269,7 +335,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
 
 void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
-  auto next_tokens_cpu = next_tokens.Span();
+  auto next_tokens_cpu = next_tokens.CpuSpan();
   auto batch_size = params_->search.batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
@@ -278,16 +344,13 @@ void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     }
     AppendNextTokensToSequences();
   }
-  // Reset done count/state
-  done_ = false;
-  not_done_count_ = params_->search.batch_size;
-  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+
+  ResetDone();
 }
 
 void GreedySearch_Cpu::RewindTo(size_t index) {
-  done_ = false;
-  not_done_count_ = params_->search.batch_size;
-  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+  ResetDone();
+
   // Set next tokens to the last tokens in the sequence
   if (index > 0) {
     for (int i = 0; i < params_->BatchBeamSize(); i++) {
@@ -300,7 +363,7 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
 
 void BeamSearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
-  auto next_tokens_cpu = next_tokens.Span();
+  auto next_tokens_cpu = next_tokens.CpuSpan();
   auto batch_beam_size = params_->BatchBeamSize();
   auto tokens_count_per_batch = next_tokens_cpu.size() / params_->search.batch_size;
   if (tokens_count_per_batch > sequences_.max_length_) {
@@ -327,8 +390,8 @@ bool BeamSearch_Cpu::IsDone() const {
 }
 
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
-  auto sequences_span = sequences_.GetSequences().Span();
-  auto sequences_next_span = sequences_.GetNextSequences().Span();
+  auto sequences_span = sequences_.GetSequences().CpuSpan();
+  auto sequences_next_span = sequences_.GetNextSequences().CpuSpan();
   auto max_length = sequences_.max_length_;
   auto current_length = sequences_.GetSequenceLength();
   auto batch_beam_next_tokens = beam_scorer_->GetNextTokens().Span();
@@ -345,6 +408,7 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
     sequences_next_span[i * max_length + current_length] = batch_beam_next_tokens[i];
   }
   auto next_tokens_device = beam_scorer_->GetNextTokens();
+  sequences_.GetNextSequences().CopyCpuToDevice();
   sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
@@ -368,7 +432,6 @@ DeviceSpan<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
   return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
 }
 
-// TODO(aciddelgado): my question is, should this return copy or reference? A: A copy, as with DeviceSpan it's like a span
 DeviceSpan<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
   Finalize(params_->search.num_return_sequences);
   return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
@@ -376,7 +439,7 @@ DeviceSpan<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id)
 
 std::span<float> Search_Cpu::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_->BatchBeamSize());
-  return next_token_scores_.Span().subspan(static_cast<size_t>(batch_beam_index) * params_->config.model.vocab_size, params_->config.model.vocab_size);
+  return next_token_scores_.CpuSpan().subspan(static_cast<size_t>(batch_beam_index) * params_->config.model.vocab_size, params_->config.model.vocab_size);
 }
 
 void Search_Cpu::ApplyMinLength(int min_length) {
@@ -387,7 +450,8 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    beam_token_scores[params_->config.model.eos_token_id] = std::numeric_limits<float>::lowest();
+    for (auto token_id : params_->config.model.eos_token_id)
+      beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
   }
 }
 

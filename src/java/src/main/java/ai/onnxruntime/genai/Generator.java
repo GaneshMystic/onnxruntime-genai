@@ -62,6 +62,43 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
+   * Add a Tensor as a model input.
+   *
+   * @param name Name of the model input the tensor will provide.
+   * @param tensor Tensor to add.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setModelInput(String name, Tensor tensor) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (tensor.nativeHandle() == 0) {
+      throw new IllegalArgumentException("tensor has been freed and is invalid");
+    }
+
+    setModelInput(nativeHandle, name, tensor.nativeHandle());
+  }
+
+  /**
+   * Add a NamedTensors as a model input.
+   *
+   * @param namedTensors NamedTensors to add.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setInputs(NamedTensors namedTensors) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (namedTensors.nativeHandle() == 0) {
+      throw new IllegalArgumentException("tensor has been freed and is invalid");
+    }
+
+    setInputs(nativeHandle, namedTensors.nativeHandle());
+  }
+
+  /**
    * Appends tokens to the generator.
    *
    * @param inputIDs The tokens to append.
@@ -94,13 +131,26 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
+   * Returns the token count in the generator.
+   *
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public long tokenCount() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenCount(nativeHandle);
+  }
+
+  /**
    * Rewinds the generator to the given length. This is useful when the user wants to rewind the
    * generator to a specific length and continue generating from that point.
    *
    * @param newLength The desired length in tokens after rewinding.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public void rewindTo(int newLength) throws GenAIException {
+  public void rewindTo(long newLength) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
@@ -150,6 +200,18 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     }
 
     return getSequenceLastToken(nativeHandle, sequenceIndex);
+  }
+
+  /**
+   * Returns a copy of the model input identified by the given name as a Tensor.
+   *
+   * @param name The name of the input needed.
+   * @return The tensor.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Tensor getInput(String name) throws GenAIException {
+    long tensorHandle = getInputNative(nativeHandle, name);
+    return new Tensor(tensorHandle);
   }
 
   /**
@@ -221,12 +283,19 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native boolean isDone(long nativeHandle);
 
+  private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
+      throws GenAIException;
+
+  private native void setInputs(long nativeHandle, long namedTensorsHandle) throws GenAIException;
+
   private native void appendTokens(long nativeHandle, int[] tokens) throws GenAIException;
 
   private native void appendTokenSequences(long nativeHandle, long sequencesHandle)
       throws GenAIException;
 
-  private native void rewindTo(long nativeHandle, int newLength) throws GenAIException;
+  private native long tokenCount(long nativeHandle) throws GenAIException;
+
+  private native void rewindTo(long nativeHandle, long newLength) throws GenAIException;
 
   private native void generateNextTokenNative(long nativeHandle) throws GenAIException;
 
@@ -238,6 +307,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native void setActiveAdapter(
       long nativeHandle, long adaptersNativeHandle, String adapterName) throws GenAIException;
+
+  private native long getInputNative(long nativeHandle, String outputName) throws GenAIException;
 
   private native long getOutputNative(long nativeHandle, String outputName) throws GenAIException;
 }

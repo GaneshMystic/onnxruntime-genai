@@ -29,19 +29,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchBool(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), value));
         }
 
-        public void TryGraphCaptureWithMaxBatchSize(int maxBatchSize)
+        public void SetGuidance(string type, string data, bool enableFFTokens = false)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(_generatorParamsHandle, maxBatchSize));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetGuidance(_generatorParamsHandle, StringUtils.ToUtf8(type), StringUtils.ToUtf8(data), enableFFTokens));
         }
 
-        public void SetModelInput(string name, Tensor value)
+        public double GetSearchNumber(string searchOption)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetModelInput(_generatorParamsHandle, StringUtils.ToUtf8(name), value.Handle));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsGetSearchNumber(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), out double value));
+            return value;
         }
 
-        public void SetInputs(NamedTensors namedTensors)
+        public bool GetSearchBool(string searchOption)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputs(_generatorParamsHandle, namedTensors.Handle));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsGetSearchBool(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), out bool value));
+            return value;
         }
 
         ~GeneratorParams()

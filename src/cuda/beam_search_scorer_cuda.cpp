@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "generators.h"
 #include "search.h"
 #include "search_cuda.h"
@@ -7,14 +10,14 @@
 
 namespace Generators {
 
-BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
-    : stream_{parameters.cuda_stream} {
+BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters, std::span<int32_t> cuda_eos_tokens)
+    : stream_{GetStream()},
+      eos_tokens_{cuda_eos_tokens} {
   state_cpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
   state_cpu_->batch_size_ = static_cast<size_t>(parameters.search.batch_size);
   state_cpu_->num_beams_ = static_cast<size_t>(parameters.search.num_beams);
   state_cpu_->max_length_ = static_cast<size_t>(parameters.search.max_length);
   state_cpu_->pad_token_id_ = parameters.config.model.pad_token_id;
-  state_cpu_->eos_token_id_ = parameters.config.model.eos_token_id;
   state_cpu_->early_stopping_ = parameters.search.early_stopping;
   state_cpu_->not_done_count_ = parameters.search.batch_size;
   state_cpu_->hypothesis_buffer_used_ = 0;
@@ -48,6 +51,7 @@ void BeamSearchScorer_Cuda::Process(Sequences& sequences,
                                     std::span<const int32_t> next_indices) {
   cuda::LaunchBeamSearchScorer_Process(*state_cpu_,
                                        *state_gpu_,
+                                       eos_tokens_,
                                        sequences.GetSequences().Span(),
                                        sequences.GetSequenceLength(),
                                        beam_hyps_,

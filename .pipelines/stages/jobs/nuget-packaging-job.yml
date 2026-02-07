@@ -47,6 +47,16 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_win_qnn
+  displayName: 'Whether QNN nuget package should be built.'
+  type: boolean
+  default: false
+
+- name: enable_winml
+  displayName: 'Whether WinML nuget package should be built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -54,8 +64,12 @@ parameters:
   type: string
   default: 'release'
 
+- name: nuget_version_type
+  type: string
+  default: 'stable'
+
 jobs:
-- job: nuget_${{ parameters.ep }}_packaging
+- job: nuget_${{ parameters.ep }}_packaging_dep_qnn_${{ parameters.enable_win_qnn }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: ep
@@ -77,26 +91,49 @@ jobs:
     ${{ else }}:
       value: 'MinSizeRel'
 
-  - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.ep }}'
+  - name: nugetArtifactName
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'onnxruntime-genai-winml'
+    ${{ else }}:
+      value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}-nuget'
 
   - name: genai_nuget_package_name
-    ${{ if eq(parameters.ep, 'cpu') }}:
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.WinML'
 
   - name: ort_nuget_package_name
-    ${{ if eq(parameters.ep, 'cpu') }}:
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
       value: 'Microsoft.ML.OnnxRuntime'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
+      value: 'Microsoft.ML.OnnxRuntime.QNN'
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'Microsoft.WindowsAppSDK.ML'
 
   steps:
+  - ${{ if eq(parameters.enable_winml, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download onnxruntime-genai-win-winml-x64-capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-winml-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download onnxruntime-genai-win-winml-arm64-capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-winml-arm64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
@@ -149,11 +186,6 @@ jobs:
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
-        StepName: 'Download osx-cpu-x64 capi Artifacts'
-        ArtifactName: onnxruntime-genai-osx-cpu-x64-capi
-        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
         StepName: 'Download osx-cpu-arm64 capi Artifacts'
         ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
@@ -178,8 +210,19 @@ jobs:
     submodules: recursive
 
   - template: steps/utils/set-genai-version.yml
+    parameters:
+      nuget_version_type: ${{ parameters.nuget_version_type }}
 
   - task: NuGetAuthenticate@1
+
+  - powershell: |
+      dotnet --info
+      dotnet workload install android
+      dotnet workload install ios
+      dotnet workload install maccatalyst
+      dotnet workload install macos
+    displayName: 'Install dependencies'
+    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
   - powershell: |
       dotnet --info
@@ -213,19 +256,21 @@ jobs:
       foreach ($file in $artifacts) {
         $a = $file.Name
         Write-Host "Extracting " $a
-        $rid_match = $a -match "onnxruntime-genai-$(genai_version)-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
-        if ($rid_match) {
-          $rid = $Matches.1
-        }
-        else {
-          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version)(.+?)?(\.zip|\.aar)"
-          if ($rid_match) {
-            $rid = $Matches.1
-          }
-          else {
-            Write-Host "Invalid artifact name" $file
-            return
-          }
+        if ($a -like "*win-x64*") {
+          $rid = "win-x64"
+        } elseif ($a -like "*win-arm64*") {
+          $rid = "win-arm64"
+        } elseif ($a -like "*linux-x64*") {
+          $rid = "linux-x64"
+        } elseif ($a -like "*osx-arm64*") {
+          $rid = "osx-arm64"
+        } elseif ($a -like "*android*") {
+          $rid = "android"
+        } elseif ($a -like "*ios*") {
+          $rid = "ios"
+        } else {
+          Write-Host "Unknown artifact name" $a
+          return
         }
 
         mkdir -Force $outputDir/$rid
@@ -259,7 +304,7 @@ jobs:
 
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: 3.10
+      versionSpec: 3.11
       addToPath: true
 
   - powershell: |
@@ -298,8 +343,8 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: Genai NuGet'
     inputs:
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
-      ArtifactName: $(artifactName)-nuget
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: $(nugetArtifactName)

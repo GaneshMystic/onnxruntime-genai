@@ -44,6 +44,7 @@ struct Search_Cpu : Search {
   DeviceSpan<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
 
   bool IsDone() const override { return done_; }
+  void ResetDone();
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
 
@@ -51,6 +52,8 @@ struct Search_Cpu : Search {
   void ApplyRepetitionPenalty(float penalty) override;
 
   std::span<float> GetScores(int batch_beam_index);
+
+  DeviceInterface& cpu_device_;
 
   DeviceSpan<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
 
@@ -73,6 +76,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;
 
   // Used by continuous decoding search.
+  void ResetDone();
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;
   void RewindTo(size_t index) override;
 
@@ -82,7 +86,6 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   bool PadIfAlreadyEOS(size_t batch_id);
 
-  std::unique_ptr<int32_t[]> next_tokens_buffer_;
   DeviceSpan<int32_t> next_tokens_ptr_;
   std::unique_ptr<int32_t[]> temp_topk_buffer_;
 

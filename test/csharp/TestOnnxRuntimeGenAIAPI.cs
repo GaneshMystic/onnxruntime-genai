@@ -2,12 +2,15 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Runtime.CompilerServices;
+using System.Text;
+using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
+using Microsoft.Extensions.AI;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -86,11 +89,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _adaptersPath => _lazyAdaptersPath.Value;
-
+        private static OgaHandle ogaHandle;
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
+            Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
+            // Initialize GenAI and register a handler to dispose it on process exit
+            ogaHandle = new OgaHandle();
+            AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
             this.output = o;
+            Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute
@@ -149,7 +157,63 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         using (var generator = new Generator(model, generatorParams))
                         {
-                            Assert.NotNull(generatorParams);
+                            Assert.NotNull(generator);
+                            generator.AppendTokens(inputIDs);
+
+                            Assert.False(generator.IsDone());
+                            Assert.Equal(maxLength, generatorParams.GetSearchNumber("max_length"));
+                            Assert.Equal(true, generatorParams.GetSearchBool("early_stopping"));
+                            Assert.Equal(generator.GetSequence(0).Length, (int)generator.TokenCount());
+
+                            while (!generator.IsDone())
+                            {
+                                generator.GenerateNextToken();
+                            }
+
+                            for (ulong i = 0; i < batchSize; i++)
+                            {
+                                var sequence = generator.GetSequence(i).ToArray();
+                                var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                                Assert.Equal(expectedSequence, sequence);
+                                Assert.Equal(generator.GetSequence(0).Length, (int)generator.TokenCount());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        [Fact(DisplayName = "TestLoadModelFromMemory")]
+        public void TestLoadModelFromMemory()
+        {
+            ulong maxLength = 10;
+            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
+            var inputIDsShape = new ulong[] { 2, 4 };
+            ulong batchSize = inputIDsShape[0];
+            var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+                                             0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
+
+            string modelPath = _tinyRandomGpt2ModelPath;
+            using (var config = new Config(modelPath))
+            {
+                Assert.NotNull(config);
+                var modelData = File.ReadAllBytes(Path.Combine(modelPath, "past.onnx"));
+                Assert.NotNull(modelData);
+                config.AddModelData("past.onnx", modelData);
+                using (var model = new Model(config))
+                {
+                    config.RemoveModelData("past.onnx");
+                    Assert.NotNull(model);
+                    using(var generatorParams = new GeneratorParams(model))
+                    {
+                        Assert.NotNull(generatorParams);
+
+                        generatorParams.SetSearchOption("max_length", maxLength);
+                        generatorParams.SetSearchOption("batch_size", batchSize);
+
+                        using (var generator = new Generator(model, generatorParams))
+                        {
+                            Assert.NotNull(generator);
 
                             generator.AppendTokens(inputIDs);
                             Assert.False(generator.IsDone());
@@ -168,6 +232,24 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     }
                 }
             }
+        }
+
+        [Fact(DisplayName = "TestAudioOpenBytes")]
+        public void TestAudioOpenBytes()
+        {
+            byte[] audioBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                                            "test_models", "audios", "1272-141231-0002.mp3"));
+            var audios = Audios.Load(audioBytes);
+            Assert.NotNull(audios);
+        }
+
+        [Fact(DisplayName = "TestImageOpenBytes")]
+        public void TestImageOpenBytes()
+        {
+            byte[] imageBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                                            "test_models", "images", "10809054.jpg"));
+            var images = Images.Load(imageBytes);
+            Assert.NotNull(images);
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTopKSearch")]
@@ -349,6 +431,36 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestChatClient")]
+        public async Task TestChatClient()
+        {
+            OnnxRuntimeGenAIChatClientOptions options = new()
+            {
+                StopSequences = ["<|system|>", "<|user|>", "<|assistant|>", "<|end|>"],
+                PromptFormatter = static (messages, options) =>
+                {
+                    StringBuilder prompt = new();
+
+                    foreach (var message in messages)
+                        foreach (var content in message.Contents.OfType<TextContent>())
+                            prompt.Append("<|").Append(message.Role.Value).Append("|>\n").Append(content.Text).Append("<|end|>\n");
+
+                    return prompt.Append("<|assistant|>\n").ToString();
+                },
+            };
+
+            using var client = new OnnxRuntimeGenAIChatClient(_phi2Path, options);
+
+            var completion = await client.GetResponseAsync("The quick brown fox jumps over the lazy dog.", new()
+            {
+                MaxOutputTokens = 10,
+                Temperature = 0f,
+                StopSequences = ["."],
+            });
+
+            Assert.NotEmpty(completion.Text);
+        }
+
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
@@ -480,6 +592,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 {
                     Assert.NotNull(tokenizer);
 
+                    Assert.Equal(50256, tokenizer.GetBosTokenId());
+                    Assert.Equal(50256, tokenizer.GetPadTokenId());
+                    Assert.Equal(1, tokenizer.GetEosTokenIds().Length);
+                    Assert.Equal(50256, tokenizer.GetEosTokenIds()[0]);
+
                     var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
@@ -546,7 +663,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 Assert.Equal(shape, tensor.Shape());
                 Assert.Equal(ElementType.float32, tensor.Type());
 
-                generatorParams.SetModelInput("test_input", tensor);
+                using var generator = new Generator(model, generatorParams);
+                Assert.NotNull(generator);
+                generator.SetModelInput("test_input", tensor);
             }
             finally
             {
@@ -574,6 +693,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnAdaptersAbsentFact(DisplayName = "TestAdapters")]
         public void TestAdapters()
         {
+            Console.WriteLine("**** Running TestAdapters");
+
             string modelPath = _adaptersPath;
             string adapterPath = Path.Combine(modelPath, "adapters.onnx_adapter");
 
@@ -605,7 +726,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                 using var generator = new Generator(model, genParams);
                 generator.AppendTokenSequences(sequences);
-                while(!generator.IsDone())
+                while (!generator.IsDone())
                 {
                     generator.GenerateNextToken();
                 }

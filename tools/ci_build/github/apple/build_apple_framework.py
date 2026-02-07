@@ -18,7 +18,7 @@ BUILD_PY = os.path.join(REPO_DIR, "build.py")
 # We by default will build below 3 archs
 DEFAULT_BUILD_OSX_ARCHS = {
     "iphoneos": ["arm64"],
-    "iphonesimulator": ["arm64", "x86_64"],
+    "iphonesimulator": ["arm64",],
 }
 
 
@@ -39,7 +39,7 @@ def _parse_build_settings(args):
 
 
 # Build fat framework for all archs of a single sysroot
-# For example, arm64 and x86_64 for iphonesimulator
+# For example, arm64 for iphonesimulator
 def _build_for_apple_sysroot(
     build_config, intermediates_dir, base_build_command, sysroot, archs, build_dynamic_framework
 ):
@@ -171,10 +171,11 @@ def _build_package(args):
             + build_settings["build_params"]["base"]
             + build_settings["build_params"][sysroot]
             + ["--config=" + build_config]
+            + ["--skip_examples", "--skip_tests"]
         )
 
         if args.ort_home:
-            base_build_command += ['--ort_home', args.ort_home]
+            base_build_command += ["--ort_home", args.ort_home]
 
         if args.include_ops_by_config is not None:
             base_build_command += ["--include_ops_by_config=" + str(args.include_ops_by_config.resolve())]

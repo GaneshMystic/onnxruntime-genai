@@ -31,6 +31,7 @@ set(REPO_ROOT ${PROJECT_SOURCE_DIR})
 set(SRC_ROOT ${REPO_ROOT}/src)
 set(GENERATORS_ROOT ${SRC_ROOT})
 set(MODELS_ROOT ${SRC_ROOT}/models)
+set(ENGINE_ROOT ${SRC_ROOT}/engine)
 
 # Define the dependency libraries
 
@@ -56,7 +57,12 @@ elseif(APPLE)
     set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
   endif()
 else()
-  set(ONNXRUNTIME_LIB "libonnxruntime.so")
+  #In AIX, only CPU inferencing is supported, so no need to update ONNXRUNTIME_PROVIDERS_CUDA_LIB and ONNXRUNTIME_PROVIDERS_ROCM_LIB
+  if (CMAKE_SYSTEM_NAME MATCHES "AIX")
+    set(ONNXRUNTIME_LIB "libonnxruntime.a")
+  else()
+    set(ONNXRUNTIME_LIB "libonnxruntime.so")
+  endif()
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
   set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.so")
 endif()
@@ -66,8 +72,20 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.cpp"
   "${GENERATORS_ROOT}/cpu/*.h"
   "${GENERATORS_ROOT}/cpu/*.cpp"
+  "${GENERATORS_ROOT}/qnn/*.h"
+  "${GENERATORS_ROOT}/qnn/*.cpp"
+  "${GENERATORS_ROOT}/webgpu/*.h"
+  "${GENERATORS_ROOT}/webgpu/*.cpp"
+  "${GENERATORS_ROOT}/openvino/*.h"
+  "${GENERATORS_ROOT}/openvino/*.cpp"
+  "${GENERATORS_ROOT}/ryzenai/*.h"
+  "${GENERATORS_ROOT}/ryzenai/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
+  "${ENGINE_ROOT}/*.h"
+  "${ENGINE_ROOT}/*.cpp"
+  "${ENGINE_ROOT}/decoders/*.h"
+  "${ENGINE_ROOT}/decoders/*.cpp"
 )
 
 set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
@@ -76,6 +94,8 @@ if (IOS OR MAC_CATALYST)
   if (NOT EXISTS "${ORT_LIB_DIR}/onnxruntime.xcframework")
     message(FATAL_ERROR "Expected the ONNX Runtime XCFramework to be found at ${ORT_LIB_DIR}/onnxruntime.xcframework. Actual: Not found.")
   endif()
+elseif (USE_WINML)
+    message(STATUS "Using WinML, does NOT include ONNX Runtime library, is provied by Windows.")
 else()
   if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
     message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
@@ -138,6 +158,8 @@ else()
     set(genai_target_platform "arm64")
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
     set(genai_target_platform "x64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "powerpc")
+    set(genai_target_platform "powerpc")
   else()
     message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
   endif()

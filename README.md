@@ -1,38 +1,33 @@
 # ONNX Runtime GenAI
 
-## *Main branch contains new API changes and examples in main branch reflect these changes. For example scripts compatible with current release (0.5.2), [see release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.5.2).*
-
+## Status
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
-Run generative AI models with ONNX Runtime.
+[![Nightly Build](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml/badge.svg)](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml)
 
-This API gives you an easy, flexible and performant way of running LLMs on device. 
+## Description
 
-It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
+Run generative AI models with ONNX Runtime. This API gives you an easy, flexible and performant way of running LLMs on device. It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, KV cache management, and grammar specification for tool calling.
 
-See documentation at https://onnxruntime.ai/docs/genai.
+ONNX Runtime GenAI powers Foundry Local, Windows ML, and the Visual Studio Code AI Toolkit.
 
-|Support matrix|Supported now|Under development|On the roadmap|
-|-|-|-|-|
-|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi (language + vision)<br/>Qwen <br/>Nemotron <br/>|Whisper|Stable diffusion|
-|API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
-|Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
-|Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
-|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> OpenVINO <br/> ROCm ||
-|Features|| Interactive decoding <br/> Customization (fine-tuning)| Speculative decoding |
+See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/genai) for more details.
 
-\* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
+| Support matrix | Supported now | Under development | On the roadmap|
+| -------------- | ------------- | ----------------- | -------------- |
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Fara <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen (language + vision) <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
+| API| Python <br/>C# <br/>C/C++ <br/> Java ^ | Objective-C ||
+| O/S | Linux <br/> Windows <br/>Mac  <br/>Android   || iOS |||
+| Architecture | x86 <br/> x64 <br/> arm64 ||||
+| Hardware Acceleration | CPU <br/> CUDA <br/> DirectML <br/> NvTensorRtRtx (TRT-RTX) <br/> OpenVINO <br/> QNN <br/> WebGPU | | AMD GPU |
+| Features | Multi-LoRA <br/> Continuous decoding <br/> Constrained decoding | | Speculative decoding |
 
-\+ The Mistral model architecture supports similar model families such as Zephyr.
-
-\^ Requires build from source
-
-\~ Windows builds available, requires build from source for other platforms
+^ Requires build from source
 
 ## Installation
 
-See https://onnxruntime.ai/docs/genai/howto/install
+See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html)
 
 ## Sample code for Phi-3 in Python
 
@@ -43,7 +38,7 @@ See https://onnxruntime.ai/docs/genai/howto/install
    ```
 
 2. Install the API
-   
+
    ```shell
    pip install numpy
    pip install --pre onnxruntime-genai
@@ -51,14 +46,12 @@ See https://onnxruntime.ai/docs/genai/howto/install
 
 3. Run the model
 
-   ### Build from source / Next release (0.6.0)
-
    ```python
    import onnxruntime_genai as og
 
    model = og.Model('cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4')
    tokenizer = og.Tokenizer(model)
-   tokenizer_stream = tokenizer.create_stream()
+   stream = tokenizer.create_stream()
     
    # Set the max length to something sensible by default,
    # since otherwise it will be set to the entire context length
@@ -71,7 +64,7 @@ See https://onnxruntime.ai/docs/genai/howto/install
    text = input("Input: ")
    if not text:
       print("Error, input cannot be empty")
-      exit
+      exit()
 
    prompt = f'{chat_template.format(input=text)}'
 
@@ -86,62 +79,76 @@ See https://onnxruntime.ai/docs/genai/howto/install
    try:
       generator.append_tokens(input_tokens)
       while not generator.is_done():
-        generator.generate_next_token()
-
-        new_token = generator.get_next_tokens()[0]
-        print(tokenizer_stream.decode(new_token), end='', flush=True)
+         generator.generate_next_token()
+         new_token = generator.get_next_tokens()[0]
+         print(stream.decode(new_token), end='', flush=True)
    except KeyboardInterrupt:
-       print("  --control+c pressed, aborting generation--")
+         print("  --control+c pressed, aborting generation--")
 
    print()
    del generator
    ```
 
-   ### Current release (until 0.5.x)
+### Choose the correct version of the examples
 
-   ```python
-   import onnxruntime_genai as og
+Due to the evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version.
 
-   model = og.Model('cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4')
-   tokenizer = og.Tokenizer(model)
-   tokenizer_stream = tokenizer.create_stream()
-    
-   # Set the max length to something sensible by default,
-   # since otherwise it will be set to the entire context length
-   search_options = {}
-   search_options['max_length'] = 2048
+### Stable version
 
-   chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
+Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). For example, install the Python package.
 
-   text = input("Input: ")
-   if not text:
-      print("Error, input cannot be empty")
-      exit
+```bash
+pip install onnxruntime-genai
+```
 
-   prompt = f'{chat_template.format(input=text)}'
+Get the version of the package
 
-   input_tokens = tokenizer.encode(prompt)
+Linux/Mac:
+```bash
+pip list | grep onnxruntime-genai
+```
 
-   params = og.GeneratorParams(model)
-   params.set_search_options(**search_options)
+Windows:
+```bash
+pip list | findstr "onnxruntime-genai"
+```
 
-   generator = og.Generator(model, params)
-   generator.append_tokens(input_tokens)
-  
-   print("Output: ", end='', flush=True)
+Then, check out the version of the examples that corresponds to that release.
 
-   try:
-      while not generator.is_done():
-        generator.generate_next_token()
+```bash
+# Clone the repo
+git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
+# Checkout the branch for the version you are using
+git checkout v0.11.5
+cd examples
+```
 
-        new_token = generator.get_next_tokens()[0]
-        print(tokenizer_stream.decode(new_token), end='', flush=True)
-   except KeyboardInterrupt:
-       print("  --control+c pressed, aborting generation--")
+### Nightly version (main branch)
 
-   print()
-   del generator
-   ```
+Checkout the main branch of the repo
+
+```bash
+git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
+```
+
+Build from source, using these [instructions](https://onnxruntime.ai/docs/genai/howto/build-from-source.html). For example, to build the Python wheel:
+
+```bash
+python build.py
+```
+
+Navigate to the examples folder in the main branch.
+
+```bash
+cd examples
+```
+
+To install the nightly Python build:
+
+```bash
+# Change onnxruntime-genai to the Python package you want to install
+pip install --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime-genai
+```
 
 ## Roadmap
 
@@ -162,10 +169,30 @@ This project has adopted the [Microsoft Open Source Code of Conduct](https://ope
 For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
 contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
+### Linting
+
+This project enables [lintrunner](https://github.com/suo/lintrunner) for linting. You can install the dependencies and initialize with
+
+```sh
+pip install -r requirements-lintrunner.txt
+lintrunner init
+```
+
+This will install lintrunner on your system and download all the necessary dependencies to run linters locally.
+
+To format local changes:
+
+```bash
+lintrunner -a
+```
+
+To format all files:
+
+```bash
+lintrunner -a --all-files
+```
+
 ## Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
-trademarks or logos is subject to and must follow 
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
+trademarks or logos is subject to and must follow [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those third-party's policies.
